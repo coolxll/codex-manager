@@ -908,31 +908,63 @@ class RegistrationEngine:
     def _get_workspace_id(self) -> Optional[str]:
         """获取 Workspace ID"""
         try:
-            cookie_names = (
-                "oai-client-auth-session",
-                "oai_client_auth_session",
-                "oai-client-auth-info",
-                "oai_client_auth_info",
-            )
-            found_cookie = False
+            # 优先尝试 oai-client-auth-session，这是主要的授权 cookie
+            auth_cookie = self.session.cookies.get("oai-client-auth-session")
+            if not auth_cookie:
+                # 回退到其他可能的 cookie 名称
+                for cookie_name in (
+                    "oai_client_auth_session",
+                    "oai-client-auth-info",
+                    "oai_client_auth_info",
+                ):
+                    auth_cookie = self.session.cookies.get(cookie_name)
+                    if auth_cookie:
+                        break
 
-            for cookie_name in cookie_names:
-                auth_cookie = self.session.cookies.get(cookie_name)
-                if not auth_cookie:
-                    continue
-
-                found_cookie = True
-                workspace_id = self._extract_workspace_id_from_cookie(auth_cookie)
-                if workspace_id:
-                    self._log(f"Workspace ID: {workspace_id}")
-                    return workspace_id
-
-            if not found_cookie:
+            if not auth_cookie:
                 self._log("未能获取到授权 Cookie", "error")
                 return None
 
-            self._log("授权 Cookie 里没有 workspace 信息", "error")
-            return None
+            # 解析 JWT 格式的 cookie
+            segments = auth_cookie.split(".")
+            if len(segments) < 1:
+                self._log("Cookie 格式错误", "error")
+                return None
+
+            self._log(f"[DEBUG] auth_cookie segments: {len(segments)}")
+            auth_json_list = []
+
+            # 尝试解码每个 segment，找到包含 workspaces 的那个
+            for i, segment in enumerate(segments):
+                try:
+                    pad = "=" * ((4 - (len(segment) % 4)) % 4)
+                    decoded = base64.urlsafe_b64decode((segment + pad).encode("ascii"))
+                    decoded_json = json.loads(decoded.decode("utf-8"))
+                    self._log(f"[DEBUG] segment {i} keys: {list(decoded_json.keys()) if isinstance(decoded_json, dict) else 'not a dict'}")
+                    auth_json_list.append(decoded_json)
+                except Exception as e:
+                    self._log(f"[DEBUG] segment {i} decode failed: {e}")
+
+            # 从所有解码的 JSON 中查找 workspaces
+            workspaces = []
+            for a_json in auth_json_list:
+                if isinstance(a_json, dict) and "workspaces" in a_json:
+                    workspaces = a_json.get("workspaces") or []
+                    if workspaces:
+                        self._log(f"[DEBUG] found workspaces in segment, count: {len(workspaces)}")
+                        break
+
+            if not workspaces:
+                self._log("授权 Cookie 里没有 workspace 信息", "error")
+                return None
+
+            workspace_id = str((workspaces[0] or {}).get("id") or "").strip()
+            if not workspace_id:
+                self._log("无法提取 workspace_id", "error")
+                return None
+
+            self._log(f"Workspace ID: {workspace_id}")
+            return workspace_id
 
         except Exception as e:
             self._log(f"获取 Workspace ID 失败: {e}", "error")
@@ -940,10 +972,7 @@ class RegistrationEngine:
 
     def _extract_workspace_id_from_cookie(self, cookie_value: str) -> Optional[str]:
         """从授权 Cookie 中提取 Workspace ID。"""
-        for auth_json in self._decode_cookie_json_candidates(cookie_value):
-            workspace_id = self._extract_workspace_id_from_auth_json(auth_json)
-            if workspace_id:
-                return workspace_id
+        # 此方法已由 _get_workspace_id 直接处理，保留兼容性
         return None
 
     def _extract_workspace_id_from_text(self, text: str) -> Optional[str]:
